@@ -58,6 +58,20 @@ def _dpi() -> None:
             pass
 
 
+def _open_still(path: Path) -> Image.Image:
+    """Открывает один кадр и сразу забирает пиксели из декодера, в том числе WebP."""
+    with Image.open(path) as incoming:
+        if getattr(incoming, "is_animated", False):
+            incoming.seek(0)
+        image = ImageOps.exif_transpose(incoming) or incoming
+        image.load()
+        if image.mode == "P":
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        elif image.mode not in {"RGB", "RGBA", "L"}:
+            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+        return image.copy()
+
+
 def _preview_source(image: Image.Image) -> tuple[Image.Image, float]:
     image = nbr._drawable(image)
     if image.mode not in {"RGB", "RGBA"}:
@@ -220,7 +234,7 @@ class CropApp(tk.Tk):
 
         tk.Label(
             self,
-            text="Тяните картинку · колёсико — масштаб · двойной щелчок — вписать · серая черта только на экране",
+            text="Тяните картинку · стрелки — 1 пиксель · колёсико — масштаб · двойной щелчок — вписать · серая черта только на экране",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 9),
@@ -254,58 +268,58 @@ class CropApp(tk.Tk):
         from ctypes import wintypes
 
         self.update_idletasks()
-        user32 = ctypes.windll.user32
         shell32 = ctypes.windll.shell32
+        comctl = ctypes.windll.comctl32
         lresult = ctypes.c_ssize_t
-        get_long = user32.GetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user32.GetWindowLongW
-        set_long = user32.SetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user32.SetWindowLongW
-        get_long.restype = ctypes.c_void_p
-        get_long.argtypes = [wintypes.HWND, ctypes.c_int]
-        set_long.restype = ctypes.c_void_p
-        set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-        user32.CallWindowProcW.restype = lresult
-        user32.CallWindowProcW.argtypes = [
-            ctypes.c_void_p,
+        uint_ptr = ctypes.c_size_t
+        subclass = ctypes.WINFUNCTYPE(
+            lresult,
             wintypes.HWND,
-            ctypes.c_uint,
+            wintypes.UINT,
             ctypes.c_size_t,
             ctypes.c_ssize_t,
-        ]
+            uint_ptr,
+            uint_ptr,
+        )
+        comctl.SetWindowSubclass.argtypes = [wintypes.HWND, subclass, uint_ptr, uint_ptr]
+        comctl.SetWindowSubclass.restype = wintypes.BOOL
+        comctl.DefSubclassProc.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
+        comctl.DefSubclassProc.restype = lresult
         shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
         shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
         shell32.DragQueryFileW.restype = ctypes.c_uint
         shell32.DragFinish.argtypes = [wintypes.HANDLE]
 
         if getattr(self, "_file_drop_proc", None) is None:
-            old_by_hwnd: dict[int, int] = {}
 
-            @ctypes.WINFUNCTYPE(lresult, wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
-            def wndproc(window, msg, wparam, lparam):
+            @subclass
+            def wndproc(window, msg, wparam, lparam, subclass_id, ref_data):
                 if msg == 0x0233:
-                    count = shell32.DragQueryFileW(wparam, 0xFFFFFFFF, None, 0)
-                    files: list[str] = []
-                    for index in range(count):
-                        length = shell32.DragQueryFileW(wparam, index, None, 0)
-                        buffer = ctypes.create_unicode_buffer(length + 1)
-                        shell32.DragQueryFileW(wparam, index, buffer, length + 1)
-                        files.append(buffer.value)
-                    shell32.DragFinish(wparam)
-                    self.after(0, lambda files=files: self._on_files_dropped(files))
+                    try:
+                        count = shell32.DragQueryFileW(wparam, 0xFFFFFFFF, None, 0)
+                        files: list[str] = []
+                        for index in range(count):
+                            length = shell32.DragQueryFileW(wparam, index, None, 0)
+                            buffer = ctypes.create_unicode_buffer(max(length, 0) + 8)
+                            shell32.DragQueryFileW(wparam, index, buffer, len(buffer))
+                            if buffer.value:
+                                files.append(buffer.value)
+                        shell32.DragFinish(wparam)
+                        self.after(0, lambda files=list(files): self._on_files_dropped(files))
+                    except Exception:
+                        return 0
                     return 0
-                previous = old_by_hwnd.get(int(window))
-                if previous is None:
-                    return 0
-                return user32.CallWindowProcW(previous, window, msg, wparam, lparam)
+                return comctl.DefSubclassProc(window, msg, wparam, lparam)
 
             self._file_drop_proc = wndproc
-            self._file_drop_old = old_by_hwnd
+            self._file_drop_hwnds: set[int] = set()
 
-        proc = ctypes.cast(self._file_drop_proc, ctypes.c_void_p).value
         for widget in (self, self.canvas):
             hwnd = int(widget.winfo_id())
-            if hwnd not in self._file_drop_old:
-                self._file_drop_old[hwnd] = int(get_long(hwnd, -4) or 0)
-                set_long(hwnd, -4, proc)
+            if hwnd not in self._file_drop_hwnds:
+                if not comctl.SetWindowSubclass(hwnd, self._file_drop_proc, 1, 0):
+                    continue
+                self._file_drop_hwnds.add(hwnd)
             shell32.DragAcceptFiles(hwnd, True)
 
     def _on_files_dropped(self, paths: list[str]) -> None:
@@ -332,10 +346,7 @@ class CropApp(tk.Tk):
 
     def load_image(self, path: Path) -> None:
         try:
-            with Image.open(path) as incoming:
-                transposed = ImageOps.exif_transpose(incoming) or incoming
-                transposed.load()
-                image = transposed.copy()
+            image = _open_still(path)
         except Exception as exc:
             messagebox.showerror("Normal Black Row", f"Не удалось открыть файл:\n{exc}", parent=self)
             return
@@ -633,9 +644,8 @@ class CropApp(tk.Tk):
             return None
         if self.image is None:
             return "break"
-        _, _, content_w, content_h = nbr.content_box(*self.preset, self.side, self.bar)
-        self.cx += (content_w / self.scale) * 0.02 * dx
-        self.cy += (content_h / self.scale) * 0.02 * dy
+        self.cx += dx
+        self.cy += dy
         self.request_redraw(sharp=False)
         self._arm_sharp()
         return "break"
