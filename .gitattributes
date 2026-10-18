@@ -1,0 +1,4 @@
+*.exe binary
+*.dll binary
+*.bin binary
+*.param binary

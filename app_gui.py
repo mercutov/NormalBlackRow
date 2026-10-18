@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -114,6 +115,7 @@ class CropApp(tk.Tk):
         self.bind("<Right>", lambda event: self._nudge(event, 1, 0))
         self.bind("<Up>", lambda event: self._nudge(event, 0, -1))
         self.bind("<Down>", lambda event: self._nudge(event, 0, 1))
+        self.after(800, self._check_update_async)
 
     def _build(self) -> None:
         top = tk.Frame(self, bg=BG)
@@ -564,6 +566,58 @@ class CropApp(tk.Tk):
         self.request_redraw(sharp=False)
         self._arm_sharp()
         return "break"
+
+    def _check_update_async(self) -> None:
+        def work() -> None:
+            remote = nbr.update_available()
+            if remote:
+                self.after(0, lambda: self._offer_update(remote))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_progress(self, done: int, total: int) -> None:
+        if total:
+            self.status.set(f"Скачиваю обновление: {done / 1048576:.0f} из {total / 1048576:.0f} МБ")
+        else:
+            self.status.set(f"Скачиваю обновление: {done / 1048576:.0f} МБ")
+
+    def _offer_update(self, remote: str) -> None:
+        if self._busy:
+            return
+        local = ".".join(str(part) for part in nbr.local_version())
+        agreed = messagebox.askyesno(
+            "Обновление",
+            f"Есть версия {remote}. Сейчас установлена {local}.\n\nОбновить?",
+            parent=self,
+        )
+        if not agreed:
+            return
+        self._busy = True
+        self.status.set("Обновляю…")
+
+        def work() -> None:
+            try:
+                nbr.apply_update(
+                    lambda done, total: self.after(
+                        0, lambda done=done, total=total: self._update_progress(done, total)
+                    )
+                )
+            except Exception as exc:
+                self.after(0, lambda: self._update_failed(exc))
+                return
+            self.after(0, self._restart_after_update)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, exc: Exception) -> None:
+        self._busy = False
+        messagebox.showerror("Обновление", f"Не удалось обновить:\n{exc}", parent=self)
+        self.status.set("Обновление не установилось")
+
+    def _restart_after_update(self) -> None:
+        messagebox.showinfo("Обновление", "Обновление установлено. Программа перезапустится.", parent=self)
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], cwd=nbr.app_dir())
+        self.destroy()
 
     def _refresh_model_button(self) -> None:
         if nbr.find_realesrgan() is not None:

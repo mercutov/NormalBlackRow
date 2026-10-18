@@ -242,8 +242,109 @@ def render_framed(
     return compose(photo, target_w, target_h, side, bar)
 
 
+APP_REPO = "mercutov/NormalBlackRow"
+
+
+def app_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def parse_version(text: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in text.strip().split("."):
+        if not piece.isdigit():
+            raise ValueError(f"непонятная версия: {text.strip()}")
+        parts.append(int(piece))
+    if not parts:
+        raise ValueError("пустая версия")
+    return tuple(parts)
+
+
+def local_version() -> tuple[int, ...]:
+    path = app_dir() / "VERSION"
+    if not path.is_file():
+        return (0,)
+    return parse_version(path.read_text(encoding="utf-8"))
+
+
+def fetch_remote_version() -> tuple[int, ...] | None:
+    url = f"https://raw.githubusercontent.com/{APP_REPO}/master/VERSION"
+    request = urllib.request.Request(url, headers={"User-Agent": "NormalBlackRow"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return parse_version(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def update_available() -> str | None:
+    """Версия на GitHub, если она новее локальной. Иначе None."""
+    remote = fetch_remote_version()
+    if remote is None or remote <= local_version():
+        return None
+    return ".".join(str(part) for part in remote)
+
+
+def _copy_tree(source: Path, dest: Path) -> None:
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        if any(part == "__pycache__" or part.endswith(".pyc") for part in relative.parts):
+            continue
+        target = dest / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def apply_update(on_progress=None) -> None:
+    """Подтягивает master. В клоне git это pull, в установленной копии — архив с GitHub."""
+    root = app_dir()
+    if (root / ".git").is_dir():
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        completed = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "master"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=flags,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(detail or "git pull не удался")
+        return
+
+    url = f"https://github.com/{APP_REPO}/archive/refs/heads/master.zip"
+    with tempfile.TemporaryDirectory(prefix="nbr-update-") as folder:
+        folder_path = Path(folder)
+        archive_path = folder_path / "master.zip"
+        request = urllib.request.Request(url, headers={"User-Agent": "NormalBlackRow"})
+        with urllib.request.urlopen(request, timeout=60) as response, archive_path.open("wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                done += len(chunk)
+                if on_progress is not None:
+                    on_progress(done, total)
+        unpack = folder_path / "src"
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(unpack)
+        sources = [path for path in unpack.iterdir() if path.is_dir()]
+        if len(sources) != 1:
+            raise RuntimeError("В архиве обновления не одна папка")
+        _copy_tree(sources[0], root)
+
+
 def tools_dir() -> Path:
-    return Path(__file__).resolve().parent / "tools" / "realesrgan"
+    return app_dir() / "tools" / "realesrgan"
 
 
 def find_realesrgan() -> Path | None:
@@ -259,7 +360,7 @@ def find_realesrgan() -> Path | None:
 
 
 def download_realesrgan(on_progress=None) -> Path:
-    """Скачивает портативный Real-ESRGAN в tools/. В git эта папка не входит."""
+    """Запасной путь, если в копии нет модели. Обычная установка уже содержит её."""
     existing = find_realesrgan()
     if existing is not None:
         return existing
