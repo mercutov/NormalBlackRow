@@ -124,8 +124,8 @@ def process(src: Path, side: str, width: int, dest: Path) -> None:
 
 
 FRAME_HEIGHT = 1440
-CUSTOM_WIDTH_MIN = 32
-CUSTOM_WIDTH_MAX = 7680
+CUSTOM_WIDTH_MIN = 600
+CUSTOM_WIDTH_MAX = 2000
 
 PRESETS: tuple[tuple[int, int], ...] = (
     (845, FRAME_HEIGHT),
