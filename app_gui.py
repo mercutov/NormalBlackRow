@@ -30,6 +30,7 @@ SIDES = (
     ("снизу", "bottom"),
 )
 SIDE_BY_LABEL = dict(SIDES)
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
 
 
 def _fix_tcl() -> None:
@@ -105,7 +106,7 @@ class CropApp(tk.Tk):
         self.custom_width_var = tk.IntVar(value=1080)
         self.side_label = tk.StringVar(value="слева")
         self.upscale_var = tk.BooleanVar(value=True)
-        self.status = tk.StringVar(value="Откройте картинку.")
+        self.status = tk.StringVar(value="Откройте картинку или перетащите её в окно.")
 
         self._build()
         self.bar_var.trace_add("write", self._on_bar)
@@ -116,6 +117,8 @@ class CropApp(tk.Tk):
         self.bind("<Up>", lambda event: self._nudge(event, 0, -1))
         self.bind("<Down>", lambda event: self._nudge(event, 0, 1))
         self.after(800, self._check_update_async)
+        self.after_idle(self._enable_file_drop)
+        self.bind("<Map>", lambda _event: self._enable_file_drop())
 
     def _build(self) -> None:
         top = tk.Frame(self, bg=BG)
@@ -243,6 +246,76 @@ class CropApp(tk.Tk):
             pady=4,
             font=("Segoe UI", 10),
         )
+
+    def _enable_file_drop(self) -> None:
+        if sys.platform != "win32":
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        self.update_idletasks()
+        user32 = ctypes.windll.user32
+        shell32 = ctypes.windll.shell32
+        lresult = ctypes.c_ssize_t
+        get_long = user32.GetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user32.GetWindowLongW
+        set_long = user32.SetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user32.SetWindowLongW
+        get_long.restype = ctypes.c_void_p
+        get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+        set_long.restype = ctypes.c_void_p
+        set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        user32.CallWindowProcW.restype = lresult
+        user32.CallWindowProcW.argtypes = [
+            ctypes.c_void_p,
+            wintypes.HWND,
+            ctypes.c_uint,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+        ]
+        shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+        shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        shell32.DragQueryFileW.restype = ctypes.c_uint
+        shell32.DragFinish.argtypes = [wintypes.HANDLE]
+
+        if getattr(self, "_file_drop_proc", None) is None:
+            old_by_hwnd: dict[int, int] = {}
+
+            @ctypes.WINFUNCTYPE(lresult, wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
+            def wndproc(window, msg, wparam, lparam):
+                if msg == 0x0233:
+                    count = shell32.DragQueryFileW(wparam, 0xFFFFFFFF, None, 0)
+                    files: list[str] = []
+                    for index in range(count):
+                        length = shell32.DragQueryFileW(wparam, index, None, 0)
+                        buffer = ctypes.create_unicode_buffer(length + 1)
+                        shell32.DragQueryFileW(wparam, index, buffer, length + 1)
+                        files.append(buffer.value)
+                    shell32.DragFinish(wparam)
+                    self.after(0, lambda files=files: self._on_files_dropped(files))
+                    return 0
+                previous = old_by_hwnd.get(int(window))
+                if previous is None:
+                    return 0
+                return user32.CallWindowProcW(previous, window, msg, wparam, lparam)
+
+            self._file_drop_proc = wndproc
+            self._file_drop_old = old_by_hwnd
+
+        proc = ctypes.cast(self._file_drop_proc, ctypes.c_void_p).value
+        for widget in (self, self.canvas):
+            hwnd = int(widget.winfo_id())
+            if hwnd not in self._file_drop_old:
+                self._file_drop_old[hwnd] = int(get_long(hwnd, -4) or 0)
+                set_long(hwnd, -4, proc)
+            shell32.DragAcceptFiles(hwnd, True)
+
+    def _on_files_dropped(self, paths: list[str]) -> None:
+        if self._busy:
+            return
+        images = [Path(path) for path in paths if Path(path).suffix.lower() in IMAGE_SUFFIXES]
+        if not images:
+            self.status.set("Нужна картинка: jpg, png, webp, tif или bmp.")
+            return
+        self.load_image(images[0])
 
     def choose_file(self) -> None:
         if self._busy:
@@ -424,7 +497,7 @@ class CropApp(tk.Tk):
             self.canvas.create_text(
                 width / 2,
                 height / 2,
-                text="Откройте картинку",
+                text="Откройте картинку\nили перетащите её сюда",
                 fill="#d7d7d7",
                 font=("Segoe UI", 16),
             )
