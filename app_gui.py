@@ -85,6 +85,7 @@ class CropApp(tk.Tk):
         self.preview_ratio = 1.0
         self.source_path: Path | None = None
         self.preset = nbr.PRESETS[0]
+        self.custom = False
         self.side = "left"
         self.bar = 6
         self.scale = 1.0
@@ -100,6 +101,7 @@ class CropApp(tk.Tk):
         self._busy = False
 
         self.bar_var = tk.IntVar(value=6)
+        self.custom_width_var = tk.IntVar(value=1080)
         self.side_label = tk.StringVar(value="слева")
         self.upscale_var = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Откройте картинку.")
@@ -123,6 +125,26 @@ class CropApp(tk.Tk):
             button = self._button(top, f"{width}×{height}", lambda w=width, h=height: self.choose_preset(w, h))
             button.pack(side="left", padx=(8, 0))
             self.preset_buttons[(width, height)] = button
+        self.custom_btn = self._button(top, "Своя", self._apply_custom)
+        self.custom_btn.pack(side="left", padx=(8, 0))
+        self.custom_width = tk.Spinbox(
+            top,
+            from_=nbr.CUSTOM_WIDTH_MIN,
+            to=nbr.CUSTOM_WIDTH_MAX,
+            width=6,
+            textvariable=self.custom_width_var,
+            command=self._apply_custom,
+            bg="#2c2c2c",
+            fg=FG,
+            buttonbackground=BTN,
+            insertbackground=FG,
+            relief="flat",
+            font=("Segoe UI", 10),
+        )
+        self.custom_width.pack(side="left", padx=(8, 0))
+        self.custom_width.bind("<Return>", self._apply_custom)
+        self.custom_width.bind("<KeyRelease>", self._apply_custom)
+        tk.Label(top, text="×1440", bg=BG, fg=FG, font=("Segoe UI", 10)).pack(side="left", padx=(4, 0))
 
         options = tk.Frame(self, bg=BG)
         options.pack(fill="x", padx=12, pady=4)
@@ -255,7 +277,31 @@ class CropApp(tk.Tk):
         self.request_redraw(sharp=True)
 
     def choose_preset(self, width: int, height: int) -> None:
+        self.custom = False
         self.preset = (width, height)
+        self._style_presets()
+        self._reclamp()
+        self.request_redraw(sharp=False)
+        self._arm_sharp()
+
+    def _apply_custom(self, *_args) -> None:
+        if self._syncing:
+            return
+        try:
+            width = int(self.custom_width_var.get())
+        except (tk.TclError, ValueError):
+            return
+        if not nbr.CUSTOM_WIDTH_MIN <= width <= nbr.CUSTOM_WIDTH_MAX:
+            return
+        try:
+            nbr.content_box(width, nbr.FRAME_HEIGHT, self.side, self.bar)
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        if self.custom and self.preset == (width, nbr.FRAME_HEIGHT):
+            return
+        self.custom = True
+        self.preset = (width, nbr.FRAME_HEIGHT)
         self._style_presets()
         self._reclamp()
         self.request_redraw(sharp=False)
@@ -273,10 +319,17 @@ class CropApp(tk.Tk):
 
     def _style_presets(self) -> None:
         for preset, button in self.preset_buttons.items():
-            if preset == self.preset:
+            selected = (not self.custom) and preset == self.preset
+            if selected:
                 button.configure(bg="#f2f2f2", fg="#161616", activebackground="#ffffff", activeforeground="#161616")
             else:
                 button.configure(bg=BTN, fg=FG, activebackground="#4a4a4a", activeforeground=FG)
+        if self.custom:
+            self.custom_btn.configure(bg="#f2f2f2", fg="#161616", activebackground="#ffffff", activeforeground="#161616")
+            self.custom_width.configure(bg="#f2f2f2", fg="#161616")
+        else:
+            self.custom_btn.configure(bg=BTN, fg=FG, activebackground="#4a4a4a", activeforeground=FG)
+            self.custom_width.configure(bg="#2c2c2c", fg=FG)
 
     def _on_side(self, label: str) -> None:
         self.side = SIDE_BY_LABEL[label]

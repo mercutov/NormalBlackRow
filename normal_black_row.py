@@ -123,10 +123,14 @@ def process(src: Path, side: str, width: int, dest: Path) -> None:
         _save(result, dest, exif)
 
 
+FRAME_HEIGHT = 1440
+CUSTOM_WIDTH_MIN = 32
+CUSTOM_WIDTH_MAX = 7680
+
 PRESETS: tuple[tuple[int, int], ...] = (
-    (845, 1440),
-    (1280, 1440),
-    (1690, 1440),
+    (845, FRAME_HEIGHT),
+    (1280, FRAME_HEIGHT),
+    (1690, FRAME_HEIGHT),
 )
 
 REALESRGAN_URL = (
